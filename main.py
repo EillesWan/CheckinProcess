@@ -3,7 +3,6 @@ import re
 import pandas as pd
 from typing import List, Dict, Tuple
 from openpyxl.styles import Alignment, Font
-# from openpyxl import Workbook
 
 
 # 定义函数用来从文件夹中读取所有的xlsx文件
@@ -66,9 +65,13 @@ def analyze_checkins(
     checkin_data_list: List[pd.DataFrame],
     file_names: List[str],
     class_student_list: List[Tuple[str, str]],
-) -> Dict[str, pd.DataFrame]:
+) -> Tuple[Dict[str, pd.DataFrame], List[Dict[str, str]]]:
     """根据签到数据列表和班级学生名单进行分析，按课程名称和时间分组统计签到情况"""
     course_results: Dict[str, pd.DataFrame] = {}  # 按课程名称和时间存储结果
+    anomalies: List[Dict[str, str]] = []  # 存储异常数据
+
+    id_name_dict = dict(class_student_list)
+
     for file_data, file_name in zip(checkin_data_list, file_names):
         # 检查数据结构
         if (
@@ -78,12 +81,22 @@ def analyze_checkins(
         ):
             checkin_record: pd.DataFrame = file_data
             checked_in_ids: List[str] = checkin_record["学号"].tolist()
+            checked_in_names: List[str] = checkin_record["姓名"].tolist()
             course_name = extract_course_name(file_name)  # 提取课程名称
             time_label = extract_checkin_time(checkin_record)  # 提取签到时间
             column_header = f"{time_label}\n{course_name}"  # 生成表头
             student_results: List[dict] = []
+
             for student_id, student_name in class_student_list:
-                status: str = "已签到" if student_id in checked_in_ids else "未签到"
+                status: str = (
+                    "已签到"
+                    if student_id in checked_in_ids
+                    else (
+                        "已签到*学号错误"
+                        if student_name in checked_in_names
+                        else "未签到"
+                    )
+                )
                 student_results.append(
                     {
                         "学号": student_id,
@@ -92,11 +105,52 @@ def analyze_checkins(
                     }
                 )
 
+            for checkined_student_id, checkined_student_name in zip(
+                checked_in_ids, checked_in_names
+            ):
+                if (
+                    checkined_student_id in id_name_dict.keys()
+                    and checkined_student_name != id_name_dict[checkined_student_id]
+                ):
+                    print(
+                        f"姓名与学号不匹配\n\t学号：`{checkined_student_id}`，姓名：`{checkined_student_name}`，登表名：`{id_name_dict[checkined_student_id]}`\n"
+                    )
+                    anomalies.append(
+                        {
+                            "学号": checkined_student_id,
+                            "姓名": checkined_student_name,
+                            "异常原因": "姓名与学号不匹配",
+                        }
+                    )
+                if checkined_student_id not in id_name_dict.keys():
+                    if checkined_student_name not in id_name_dict.values():
+                        print(
+                            f"学号及姓名皆错误，查无此人\n\t学号：`{checkined_student_id}`，姓名：`{checkined_student_name}`\n"
+                        )
+                        anomalies.append(
+                            {
+                                "学号": checkined_student_id,
+                                "姓名": checkined_student_name,
+                                "异常原因": "学号及姓名皆错误，查无此人",
+                            }
+                        )
+                    else:
+                        print(
+                            f"学号错误\n\t学号：`{checkined_student_id}`，姓名：`{checkined_student_name}`\n"
+                        )
+                        anomalies.append(
+                            {
+                                "学号": checkined_student_id,
+                                "姓名": checkined_student_name,
+                                "异常原因": "学号错误",
+                            }
+                        )
+
             # 将当前课程的签到结果存储到字典中
             course_results[column_header] = pd.DataFrame(student_results)
         else:
             print(f"文件 {file_name} 格式有误，无法处理")
-    return course_results
+    return course_results, anomalies
 
 
 # 定义主函数
@@ -118,7 +172,7 @@ def process_checkins(folder_path: str, class_list_file: str) -> None:
     ].values.tolist()
 
     # 分析签到情况
-    course_results: Dict[str, pd.DataFrame] = analyze_checkins(
+    course_results, anomalies = analyze_checkins(
         checkin_data_list,
         [os.path.basename(file) for file in file_list],
         class_student_list,
@@ -142,6 +196,9 @@ def process_checkins(folder_path: str, class_list_file: str) -> None:
     output_file_path: str = "Checkin_Results.xlsx"
     with pd.ExcelWriter(output_file_path, engine="openpyxl") as writer:
         final_results.to_excel(writer, sheet_name="签到统计", index=False)
+        # 将异常数据保存到另一个工作表中
+        anomalies_df = pd.DataFrame(anomalies)
+        anomalies_df.to_excel(writer, sheet_name="异常数据", index=False)
         # 设置单元格样式
         workbook = writer.book
         worksheet = writer.sheets["签到统计"]
@@ -150,13 +207,14 @@ def process_checkins(folder_path: str, class_list_file: str) -> None:
             col_letter = col[0].column_letter
             worksheet.column_dimensions[col_letter].width = 15  # 设置列宽
             for cell in col:
-                if cell.value == "已签到":
-                    cell.alignment = Alignment(horizontal="left")
-                elif cell.value == "未签到":
-                    cell.font = Font(bold=True)
-                    cell.alignment = Alignment(horizontal="right")
                 if cell.row == 1:  # 表头行
                     cell.alignment = Alignment(wrap_text=True, horizontal="center")
+                else:
+                    if "已签到" in cell.value:
+                        cell.alignment = Alignment(horizontal="left")
+                    elif "未签到" in cell.value:
+                        cell.font = Font(bold=True)
+                        cell.alignment = Alignment(horizontal="right")
 
     print(f"分析结束，结果在 {output_file_path}")
 
